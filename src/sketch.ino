@@ -3,23 +3,53 @@
 #define PIN 7
 #define NUM_LEDS 60 * 4
 
-#define DEBUG 0
+#define DEBUG 1
 
 #define OUTPUT(x) Serial.print(" " #x "="); Serial.print(x);
 
 Adafruit_NeoPixel strip = Adafruit_NeoPixel(NUM_LEDS, PIN, NEO_GRB | NEO_KHZ800);
 
-enum object_type {
-    OT_PLAYER   = '@',
-    OT_DOOR     = '#',
-    OT_ENEMY    = '!',
-    OT_BONUS    = '$',
-    OT_BULLET   = '-',
-    OT_HEALTH   = '3',
-    OT_AMMO     = '%',
-    OT_BLOOD    = '.',
+enum object_flag {
+    OF_0 = 0,
+    OF_PASSABLE  = 0x01,
+};
 
-    OT_BOUNDARY = '|',
+struct object_type {
+    char symbol;
+    byte default_length;
+    byte priority;
+    uint32_t default_color;
+    object_flag flags;
+
+    bool operator == (const object_type &b) const {
+        return this == &b;
+    };
+};
+
+const object_type OT_PLAYER   = {'@', 4, 200, 0xffffff, OF_0};
+const object_type OT_DOOR     = {'#', 3, 100, 0x00ffff, OF_0};
+const object_type OT_ENEMY    = {'!', 4, 150, 0xffffff, OF_0};
+const object_type OT_BONUS    = {'$', 2,  50, 0xffff00, OF_PASSABLE};
+const object_type OT_BULLET   = {'-', 2, 120, 0xddaf11, OF_PASSABLE};
+const object_type OT_HEALTH   = {'+', 2,  70, 0xff0000, OF_PASSABLE};
+const object_type OT_AMMO     = {'%', 2,  60, 0x00ff00, OF_PASSABLE};
+const object_type OT_BLOOD    = {'.', 4,  10, 0x800020, OF_PASSABLE};
+const object_type OT_BOUNDARY = {'|', 1,   0, 0x000000, OF_0};
+
+enum collision_flag {
+                    // Legend: s: self; o: other; X: both
+    CF_BEHIND         = 0x001,  // -ooo----sss--------
+    CF_TOUCH_BEHIND   = 0x002,  // -----ooosss--------
+    CF_OVERLAP_BEHIND = 0x004,  // ------ooXss--------
+    CF_CONTAINED      = 0x008,  // --------sXs--------
+    CF_EXACT          = 0x010,  // --------XXX--------
+    CF_OVERLAP        = 0x020,  // -------oXXXo-------
+    CF_OVERLAP_FRONT  = 0x040,  // --------ssXoo------
+    CF_TOUCH_FRONT    = 0x080,  // --------sssooo-----
+    CF_FRONT          = 0x100,  // --------sss----ooo-
+
+    CF_COLLIDING      = 0x0fe,
+    CF_ALL            = 0xfff,
 };
 
 #define PLAYER_START_POS 5
@@ -41,7 +71,7 @@ int num_objs = 0;
 long lastMillis;
 
 struct object {
-    object(object_type type, uint16_t position, byte data, object* p):
+    object(const object_type &type, uint16_t position, byte data, object* p):
         type(type),
         position(position),
         data(data)
@@ -64,18 +94,25 @@ struct object {
         num_objs -= 1;
     }
 
-    int length() {
-        switch (type) {
-            case OT_PLAYER: return 3;
-            case OT_DOOR: return 2;
-            case OT_ENEMY: return 3;
-            case OT_BONUS: return 1;
-            case OT_BULLET: return 1;
-            case OT_HEALTH: return 1;
-            case OT_AMMO: return 1;
-            case OT_BLOOD: return 3;
-            default: return 1;
+    bool passable() {
+        return this->type.flags & OF_PASSABLE;
+    }
+
+    uint32_t color(int pixel) {
+        if (type == OT_PLAYER) {
+            if (pixel == 1) return strip.Color(ammo, ammo, 255);
+            if (pixel == 2) return strip.Color(200, health, health);
+            return strip.Color(200, 200, 200);
         }
+        return this->type.default_color;
+    }
+
+    int length() {
+        return this->type.default_length;
+    }
+
+    uint16_t end() {
+        return position + length();
     }
 
     long cmp(object *other) {
@@ -98,48 +135,89 @@ struct object {
         if(o4) o4->prev = o3;
     }
 
+    collision_flag get_collision_flag(object *other) {
+        uint16_t end = other->end();
+        uint16_t pos = other->position;
+        uint16_t self_end = this->end();
+        if (end < this->position) return CF_BEHIND;
+        if (end == this->position) return CF_TOUCH_BEHIND;
+        if (pos < this->position) {
+            if (end < self_end) return CF_OVERLAP_BEHIND;
+            return CF_OVERLAP;
+        }
+        if (pos == this->position) {
+            if (end < self_end) return CF_CONTAINED;
+            if (end == self_end) return CF_EXACT;
+            return CF_OVERLAP;
+        }
+        if (pos < self_end) {
+            if (end <= self_end) return CF_CONTAINED;
+            return CF_OVERLAP_FRONT;
+        }
+        if (pos == self_end) return CF_TOUCH_FRONT;
+        return CF_FRONT;
+    }
+
     void move(int dist) {
         this->position += dist;
         if (dist > 0) {
             while (this->next && this->cmp(this->next) > 0) {
-                OUTPUT(char(this->type));
-                OUTPUT(char(this->next->type));
-                Serial.println('<');
                 print_objects();
                 this->switch_with_next();
             }
         } else if (dist < 0) {
             while (this->prev && this->cmp(this->prev) < 0) {
-                Serial.println('>');
                 this->prev->switch_with_next();
             }
         }
     }
 
-    uint32_t color(int pixel) {
-        switch (type) {
-            case OT_PLAYER: {
-                if (pixel == 1) return strip.Color(ammo, ammo, 255);
-                if (pixel == 2) return strip.Color(200, health, health);
-                return strip.Color(200, 200, 200);
-            }
-            case OT_DOOR: return 0x00ffff;
-            case OT_ENEMY: return (data % 1) ? 0x0000ff : 0xc35a1a;
-            case OT_BONUS: return 0xffff00;
-            case OT_BULLET: return 0xddaf11;
-            case OT_HEALTH: return 0x00ff00;
-            case OT_AMMO: return 0x00ffff;
-            case OT_BLOOD: return 0x800020;
-            default: return 0;
-        }
-    }
-
-    object_type type;
+    const object_type &type;
     uint16_t position;
     byte data;
     object* prev;
     object* next;
 };
+
+
+struct collision_iterator {
+    collision_iterator(object* o, int flags=CF_COLLIDING):
+        self(o), next_obj(o), iter_flags(flags), flag(0)
+    {
+        if (iter_flags & CF_BEHIND) {
+            while (next_obj->prev) next_obj = next_obj->prev;
+        } else if (iter_flags & (CF_TOUCH_BEHIND | CF_OVERLAP_BEHIND | CF_OVERLAP)) {
+            while (next_obj->prev && next_obj->prev->end() < next_obj->position) {
+                next_obj = next_obj->prev;
+            }
+        }
+        next();
+    }
+
+    object *obj;
+    int flag;
+
+    object *next() {
+        obj = NULL;
+        while (next_obj && !obj) {
+            flag = self->get_collision_flag(next_obj) & iter_flags;
+            if (flag & this->iter_flags) obj = next_obj;
+            next_obj = next_obj->next;
+            if (!(iter_flags & CF_FRONT) && next_obj->position > self->end() + 1) {
+                next_obj = NULL;
+            }
+        }
+        return obj;
+    }
+
+    operator bool() const { return obj != NULL; }
+
+private:
+    object *self;
+    object *next_obj;
+    int iter_flags;
+};
+
 
 object bound_start(OT_BOUNDARY, 0, 0, NULL);
 object player(OT_PLAYER, PLAYER_START_POS, 0, &bound_start);
@@ -157,7 +235,7 @@ void print_objects() {
     while (it->prev) it = it->prev;
     Serial.print("FORW ");
     while (true) {
-        Serial.print(char(it->type));
+        Serial.print(it->type.symbol);
         if (!it->next) break;
         it = it->next;
     }
@@ -165,7 +243,7 @@ void print_objects() {
 
     Serial.print("BACK ");
     while (true) {
-        Serial.print(char(it->type));
+        Serial.print(it->type.symbol);
         if (!it->prev) break;
         it = it->prev;
     }
@@ -173,9 +251,13 @@ void print_objects() {
 
     Serial.print("DEBUG ");
     while (true) {
-        Serial.print(char(it->type));
+        Serial.print(it->type.symbol);
         Serial.print(' ');
         Serial.print(it->position);
+        Serial.print('+');
+        Serial.print(it->length());
+        Serial.print(' ');
+        Serial.print(player.get_collision_flag(it), HEX);
         if (!it->next) break;
         if (it->cmp(it->next) > 0) {
             Serial.print(" > ");
@@ -223,10 +305,24 @@ void loop() {
         byte command = Serial.read();
         switch (command) {
             case 'a': case 'A': {
-                if (player.position > 0) player.move(-1);
+                bool moving = true;
+                for (collision_iterator it(&player, CF_OVERLAP_BEHIND | CF_TOUCH_BEHIND); it; it.next()) {
+                    if (!it.obj->passable()) {
+                        moving = false;
+                        break;
+                    }
+                }
+                if (moving and player.position > 0) player.move(-1);
             } break;
             case 'd': case 'D': {
-                player.move(1);
+                bool moving = true;
+                for (collision_iterator it(&player, CF_OVERLAP_FRONT | CF_TOUCH_FRONT); it; it.next()) {
+                    if (!it.obj->passable()) {
+                        moving = false;
+                        break;
+                    }
+                }
+                if (moving) player.move(1);
             } break;
             case '$': {
                 score += 1;
@@ -252,14 +348,14 @@ void loop() {
     if (health > 10) {
         strip.setPixelColor(HEALTH_LED, strip.Color(255 - health, health, 0));
     } else {
-        if (millis() % 500 < 150) {
+        if (nowMillis % 500 < 150) {
             strip.setPixelColor(HEALTH_LED, strip.Color(0, 0, 0));
         } else {
             strip.setPixelColor(HEALTH_LED, strip.Color(255 - health, health, 0));
         }
     }
     // ammo pixel
-    if (millis() % 256 < ammo) {
+    if (nowMillis % 256 < ammo) {
         strip.setPixelColor(AMMO_LED, strip.Color(ammo, ammo, ammo));
     } else {
         if (ammo > 20) {
@@ -286,7 +382,7 @@ void loop() {
     for (int px=0; i <= NUM_LEDS; px++, i++) {
         while (current_obj->next && current_obj->next->position <= px) {
             current_obj = current_obj->next;
-            current_obj_pixel = current_obj->length();
+            current_obj_pixel = current_obj->length() - 1;
             if (current_obj == &bound_end) {
                 Serial.println(" ERROR! Went past boundary");
                 break;
