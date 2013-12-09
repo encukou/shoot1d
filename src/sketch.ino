@@ -17,7 +17,7 @@ enum object_flag {
 struct object_type {
     char symbol;
     byte default_length;
-    byte priority;
+    byte draw_priority;
     uint32_t default_color;
     object_flag flags;
 
@@ -33,8 +33,8 @@ const object_type OT_BONUS    = {'$', 2,  50, 0xffff00, OF_PASSABLE};
 const object_type OT_BULLET   = {'-', 2, 120, 0xddaf11, OF_PASSABLE};
 const object_type OT_HEALTH   = {'+', 2,  70, 0xff0000, OF_PASSABLE};
 const object_type OT_AMMO     = {'%', 2,  60, 0x00ff00, OF_PASSABLE};
-const object_type OT_BLOOD    = {'.', 4,  10, 0x800020, OF_PASSABLE};
-const object_type OT_BOUNDARY = {'|', 1,   0, 0x000000, OF_0};
+const object_type OT_BLOOD    = {'.', 4,  10, 0x400008, OF_PASSABLE};
+const object_type OT_BOUNDARY = {'|', 1,   1, 0x000000, OF_0};
 
 enum collision_flag {
                     // Legend: s: self; o: other; X: both
@@ -179,6 +179,22 @@ struct object {
     object* next;
 };
 
+struct obj_draw_list {
+    object *obj;
+    obj_draw_list *next;
+    int pixel;
+
+    obj_draw_list(object *obj):
+        obj(obj),
+        next(NULL),
+        pixel(obj->length()) {}
+
+    obj_draw_list():
+        obj(NULL),
+        next(NULL),
+        pixel(NUM_LEDS + 2) {}
+};
+
 
 struct collision_iterator {
     collision_iterator(object* o, int flags=CF_COLLIDING):
@@ -249,7 +265,9 @@ void print_objects() {
     }
     Serial.println();
 
-    Serial.print("DEBUG ");
+    Serial.print('[');
+    Serial.print(num_objs);
+    Serial.print("] ");
     while (true) {
         Serial.print(it->type.symbol);
         Serial.print(' ');
@@ -281,7 +299,7 @@ void setup() {
     print_objects();
 
     new object(OT_DOOR, PLAYER_START_POS+5, 0, &player);
-    new object(OT_ENEMY, PLAYER_START_POS+10, 0, &bound_start);
+    new object(OT_ENEMY, PLAYER_START_POS+12, 0, &bound_start);
 
     Serial.println("A - move left");
     Serial.println("D - move right");
@@ -292,8 +310,8 @@ void loop() {
     long nowMillis = millis();
     int dt = nowMillis - lastMillis;
 
-    // Roughly every second
-    if (nowMillis / 1024 != lastMillis / 1024) {
+    // Roughly every second (1024=2**10 ms)
+    if (nowMillis >> 10 != lastMillis >> 10) {
         if (health > 200) {
             health -= 1;
             report = true;
@@ -375,41 +393,63 @@ void loop() {
     i += SCORE_LED1;
     // status border pixel
     strip.setPixelColor(i, 0);
+
     // playing field
     i++;
-    object* current_obj = &bound_start;
-    int current_obj_pixel = -1;
+    uint32_t background_color = sfx_countdown
+                                ? strip.Color(sfx_countdown * sfx_color[0] / 255,
+                                              sfx_countdown * sfx_color[1] / 255,
+                                              sfx_countdown * sfx_color[2] / 255)
+                                : 0;
+    // keep a priority-sorted list of objects we're currently drawing
+    object *current_obj = &bound_start;
+    obj_draw_list list_base;  // sentinel
+    obj_draw_list *list = &list_base;
     for (int px=0; i <= NUM_LEDS; px++, i++) {
-        while (current_obj->next && current_obj->next->position <= px) {
+        while (current_obj && current_obj->next && current_obj->next->position <= px) {
             current_obj = current_obj->next;
-            current_obj_pixel = current_obj->length() - 1;
-            if (current_obj == &bound_end) {
-                Serial.println(" ERROR! Went past boundary");
-                break;
+            // add obj to list
+            obj_draw_list *newitem = new obj_draw_list(current_obj);
+            obj_draw_list **cur = &list;
+            while (*cur && (*cur)->next &&
+                    (*cur)->obj->type.draw_priority > newitem->obj->type.draw_priority) {
+                cur = &((*cur)->next);
+            }
+            newitem->next = *cur;
+            *cur = newitem;
+        }
+
+        if (list->obj) {
+            // draw the thing on top of list
+            strip.setPixelColor(i, list->obj->color(list->pixel));
+        } else {
+            // draw background
+            strip.setPixelColor(i, background_color);
+        }
+
+        // remove drawn things from list
+        obj_draw_list **cur = &list;
+        while (*cur) {
+            (*cur)->pixel -= 1;
+            if ((*cur)->pixel <= 0) {
+                obj_draw_list *deleting = *cur;
+                *cur = deleting->next;
+                delete deleting;
+            } else {
+                cur = &((*cur)->next);
             }
         }
-        if (current_obj_pixel > -1) {
-            strip.setPixelColor(i, current_obj->color(current_obj_pixel));
-            current_obj_pixel -= 1;
-        } else if (sfx_countdown) {
-            // background with SFX happening
-            strip.setPixelColor(i, strip.Color(sfx_countdown * sfx_color[0] / 255,
-                                               sfx_countdown * sfx_color[1] / 255,
-                                               sfx_countdown * sfx_color[2] / 255));
-        } else {
-            // background
-            strip.setPixelColor(i, 0);
-        }
+    }
+    // destroy list at end
+    while(list) {
+        obj_draw_list *next = list->next;
+        if (list != &list_base) delete list;
+        list = next;
     }
     strip.show();
 
-    if (report) {
-        if (DEBUG) {
-            print_objects();
-            Serial.print('[');
-            Serial.print(num_objs);
-            Serial.print("] ");
-        }
+    if (report || nowMillis >> 8 != lastMillis >> 8) {
+        if (report && DEBUG) print_objects();
         Serial.print("♥");
         Serial.print(health);
         Serial.print(" a");
