@@ -2,6 +2,7 @@
 
 #define PIN 7
 #define NUM_LEDS 60 * 4
+#define BRIGHTNESS 10 // you want to look at the LEDs without getting blinded
 
 #define DEBUG 1
 
@@ -59,6 +60,9 @@ enum collision_flag {
 #define AMMO_LED 1
 #define SCORE_LED1 2
 
+#define DOOR_CLOSE 1
+#define DOOR_OPEN 2
+
 byte health = 200;
 byte ammo = 100;
 uint32_t score = 0;
@@ -71,10 +75,18 @@ int num_objs = 0;
 long lastMillis;
 
 struct object {
+    const object_type &type;
+    uint16_t position;
+    byte data;
+    byte data2;
+    object* prev;
+    object* next;
+
     object(const object_type &type, uint16_t position, byte data, object* p):
         type(type),
         position(position),
-        data(data)
+        data(data),
+        data2(0)
     {
         if (p) {
             while (p->position < position && p->next) p = p->next;
@@ -89,12 +101,13 @@ struct object {
 
     void remove() {
         if (prev) prev->next = next;
-        if (next) next->prev = next;
+        if (next) next->prev = prev;
         delete this;
         num_objs -= 1;
     }
 
     bool passable() {
+        if (type == OT_DOOR && data == 255) return true;
         return this->type.flags & OF_PASSABLE;
     }
 
@@ -102,7 +115,9 @@ struct object {
         if (type == OT_PLAYER) {
             if (pixel == 1) return strip.Color(ammo, ammo, 255);
             if (pixel == 2) return strip.Color(200, health, health);
-            return strip.Color(200, 200, 200);
+        } else if (type == OT_DOOR && data) {
+            if (pixel == 1) return strip.Color(0, 255-data, 255-data);
+            return strip.Color(0, 255-data, 255 - data/2);
         }
         return this->type.default_color;
     }
@@ -162,7 +177,6 @@ struct object {
         this->position += dist;
         if (dist > 0) {
             while (this->next && this->cmp(this->next) > 0) {
-                print_objects();
                 this->switch_with_next();
             }
         } else if (dist < 0) {
@@ -171,12 +185,6 @@ struct object {
             }
         }
     }
-
-    const object_type &type;
-    uint16_t position;
-    byte data;
-    object* prev;
-    object* next;
 };
 
 struct obj_draw_list {
@@ -187,7 +195,7 @@ struct obj_draw_list {
     obj_draw_list(object *obj):
         obj(obj),
         next(NULL),
-        pixel(obj->length()) {}
+        pixel(obj->length() - 1) {}
 
     obj_draw_list():
         obj(NULL),
@@ -203,7 +211,7 @@ struct collision_iterator {
         if (iter_flags & CF_BEHIND) {
             while (next_obj->prev) next_obj = next_obj->prev;
         } else if (iter_flags & (CF_TOUCH_BEHIND | CF_OVERLAP_BEHIND | CF_OVERLAP)) {
-            while (next_obj->prev && next_obj->prev->end() < next_obj->position) {
+            while (next_obj->prev && next_obj->prev->end() <= next_obj->position) {
                 next_obj = next_obj->prev;
             }
         }
@@ -292,10 +300,9 @@ void print_objects() {
 void setup() {
     Serial.begin(9600);
     strip.begin();
-    strip.setBrightness(10);
+    strip.setBrightness(BRIGHTNESS);
     strip.show();
     lastMillis = millis();
-    //player = new object(OT_PLAYER, PLAYER_START_POS, 0, NULL);
     print_objects();
 
     new object(OT_DOOR, PLAYER_START_POS+5, 0, &player);
@@ -303,6 +310,7 @@ void setup() {
 
     Serial.println("A - move left");
     Serial.println("D - move right");
+    Serial.println("W - action (open/close door)");
 }
 
 void loop() {
@@ -342,12 +350,43 @@ void loop() {
                 }
                 if (moving) player.move(1);
             } break;
+            case 'w': case 'W': {
+                for (collision_iterator it(&player, CF_TOUCH_FRONT | CF_TOUCH_BEHIND); it; it.next()) {
+                    if (it.obj->type == OT_DOOR) {
+                        if (it.obj->data == 255) {
+                            it.obj->data2 = DOOR_CLOSE;
+                        } else {
+                            it.obj->data2 = DOOR_OPEN;
+                        }
+                    }
+                }
+            } break;
             case '$': {
                 score += 1;
                 report = true;
             } break;
         }
         report = true;
+    }
+
+    for (collision_iterator it(&bound_start, CF_ALL); it; it.next()) {
+        if (it.obj->type == OT_DOOR) {
+            if (it.obj->data2 == DOOR_CLOSE) {
+                if (it.obj->data <= dt) {
+                    it.obj->data = 0;
+                    it.obj->data2 = 0;
+                } else {
+                    it.obj->data -= dt;
+                }
+            } else if (it.obj->data2 == DOOR_OPEN) {
+                if (it.obj->data + int(dt) >= 255) {
+                    it.obj->data = 255;
+                    it.obj->data2 = 0;
+                } else {
+                    it.obj->data += dt;
+                }
+            }
+        }
     }
 
     // level = log₂(score) (displayed minus 3; first 3 levels are 0)
@@ -431,7 +470,7 @@ void loop() {
         obj_draw_list **cur = &list;
         while (*cur) {
             (*cur)->pixel -= 1;
-            if ((*cur)->pixel <= 0) {
+            if ((*cur)->pixel < 0) {
                 obj_draw_list *deleting = *cur;
                 *cur = deleting->next;
                 delete deleting;
