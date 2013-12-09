@@ -4,7 +4,7 @@
 #define NUM_LEDS 60 * 4
 #define BRIGHTNESS 10 // you want to look at the LEDs without getting blinded
 
-#define DEBUG 1
+#define DEBUG 0
 
 #define OUTPUT(x) Serial.print(" " #x "="); Serial.print(x);
 
@@ -27,15 +27,38 @@ struct object_type {
     };
 };
 
-const object_type OT_PLAYER   = {'@', 4, 200, 0xffffff, OF_0};
-const object_type OT_DOOR     = {'#', 3, 100, 0x00ffff, OF_0};
-const object_type OT_ENEMY    = {'!', 4, 150, 0xffffff, OF_0};
-const object_type OT_BONUS    = {'$', 2,  50, 0xffff00, OF_PASSABLE};
-const object_type OT_BULLET   = {'-', 2, 120, 0xddaf11, OF_PASSABLE};
-const object_type OT_HEALTH   = {'+', 2,  70, 0xff0000, OF_PASSABLE};
-const object_type OT_AMMO     = {'%', 2,  60, 0x00ff00, OF_PASSABLE};
-const object_type OT_BLOOD    = {'.', 4,  10, 0x400008, OF_PASSABLE};
-const object_type OT_BOUNDARY = {'|', 1,   1, 0x000000, OF_0};
+static uint32_t rgba(byte r, byte g, byte b, byte a=0) {
+    return uint32_t(a) << 24 | uint32_t(r) << 16 | uint32_t(g) << 8 | uint32_t(b);
+}
+
+static byte getR(uint32_t color) { return color >> 16; }
+static byte getG(uint32_t color) { return color >> 8; }
+static byte getB(uint32_t color) { return color; }
+static byte getA(uint32_t color) { return color >> 24; }
+
+uint32_t mix(uint32_t color1, uint32_t color2) {
+    // color1 - on top
+    // color2 - on bottom
+    // alpha: 0=opaque; 255=transparent
+    uint32_t c1a = getA(color1);
+    if (c1a == 255) return color2;
+    if (c1a == 0 || getA(color2) == 255) return color1;
+    return rgba(
+        (getR(color1) * (255 - c1a) + getR(color2) * c1a) / 255,
+        (getG(color1) * (255 - c1a) + getG(color2) * c1a) / 255,
+        (getB(color1) * (255 - c1a) + getB(color2) * c1a) / 255,
+        c1a + getA(color2) * (255 - c1a) / 255);
+}
+
+const object_type OT_PLAYER   = {'@', 4, 200, rgba(255, 255, 255), OF_0};
+const object_type OT_DOOR     = {'#', 3, 220, rgba(  0, 255, 255), OF_0};
+const object_type OT_ENEMY    = {'!', 4, 150, rgba(255, 255, 255), OF_0};
+const object_type OT_BONUS    = {'$', 2,  50, rgba(255, 255,   0), OF_PASSABLE};
+const object_type OT_BULLET   = {'-', 2, 230, rgba(221, 175,  17), OF_PASSABLE};
+const object_type OT_HEALTH   = {'+', 2,  70, rgba(255,   0,   0), OF_PASSABLE};
+const object_type OT_AMMO     = {'%', 2,  60, rgba(  0, 255,   0), OF_PASSABLE};
+const object_type OT_BLOOD    = {'.', 4,  10, rgba( 64,   0,   8), OF_PASSABLE};
+const object_type OT_BOUNDARY = {'|', 1,   1, rgba(  0,   0,   0), OF_0};
 
 enum collision_flag {
                     // Legend: s: self; o: other; X: both
@@ -113,11 +136,11 @@ struct object {
 
     uint32_t color(int pixel) {
         if (type == OT_PLAYER) {
-            if (pixel == 1) return strip.Color(ammo, ammo, 255);
-            if (pixel == 2) return strip.Color(200, health, health);
+            if (pixel == 1) return rgba(ammo, ammo, 255, 1);
+            if (pixel == 2) return rgba(200, health, health, 2);
         } else if (type == OT_DOOR && data) {
-            if (pixel == 1) return strip.Color(0, 255-data, 255-data);
-            return strip.Color(0, 255-data, 255 - data/2);
+            if (pixel == 1) return rgba(0, 255, 255, data);
+            return rgba(0, 255 - data, 255 - data/2, data/4);
         }
         return this->type.default_color;
     }
@@ -403,22 +426,22 @@ void loop() {
     memset(strip.getPixels(), 0, strip.numPixels() * 3);
     // health pixel
     if (health > 10) {
-        strip.setPixelColor(HEALTH_LED, strip.Color(255 - health, health, 0));
+        strip.setPixelColor(HEALTH_LED, rgba(255 - health, health, 0));
     } else {
         if (nowMillis % 500 < 150) {
-            strip.setPixelColor(HEALTH_LED, strip.Color(0, 0, 0));
+            strip.setPixelColor(HEALTH_LED, rgba(0, 0, 0));
         } else {
-            strip.setPixelColor(HEALTH_LED, strip.Color(255 - health, health, 0));
+            strip.setPixelColor(HEALTH_LED, rgba(255 - health, health, 0));
         }
     }
     // ammo pixel
     if (nowMillis % 256 < ammo) {
-        strip.setPixelColor(AMMO_LED, strip.Color(ammo, ammo, ammo));
+        strip.setPixelColor(AMMO_LED, rgba(ammo, ammo, ammo));
     } else {
         if (ammo > 20) {
-            strip.setPixelColor(AMMO_LED, strip.Color(0, 0, 0));
+            strip.setPixelColor(AMMO_LED, rgba(0, 0, 0));
         } else {
-            strip.setPixelColor(AMMO_LED, strip.Color(255, 0, 0));
+            strip.setPixelColor(AMMO_LED, rgba(255, 0, 0));
         }
     }
     // score pixels
@@ -426,8 +449,8 @@ void loop() {
     for (i=0; i<level; i++) {
         strip.setPixelColor(i + SCORE_LED1,
                             (score & (1 << (level - i - 1)))
-                                ? strip.Color(255, 255, 0)
-                                : strip.Color(0, 0, 100));
+                                ? rgba(255, 255, 0)
+                                : rgba(0, 0, 100));
     }
     i += SCORE_LED1;
     // status border pixel
@@ -435,11 +458,11 @@ void loop() {
 
     // playing field
     i++;
-    uint32_t background_color = sfx_countdown
-                                ? strip.Color(sfx_countdown * sfx_color[0] / 255,
-                                              sfx_countdown * sfx_color[1] / 255,
-                                              sfx_countdown * sfx_color[2] / 255)
-                                : 0;
+    uint32_t backgroundColor = sfx_countdown
+                               ? strip.Color(sfx_countdown * sfx_color[0] / 255,
+                                             sfx_countdown * sfx_color[1] / 255,
+                                             sfx_countdown * sfx_color[2] / 255)
+                               : 0;
     // keep a priority-sorted list of objects we're currently drawing
     object *current_obj = &bound_start;
     obj_draw_list list_base;  // sentinel
@@ -458,13 +481,17 @@ void loop() {
             *cur = newitem;
         }
 
-        if (list->obj) {
-            // draw the thing on top of list
-            strip.setPixelColor(i, list->obj->color(list->pixel));
-        } else {
-            // draw background
-            strip.setPixelColor(i, background_color);
+        uint32_t color = rgba(0, 0, 0, 255);
+        for (obj_draw_list *cur = list; cur && getA(color); cur=cur->next) {
+            if (cur->obj) {
+                // draw the thing on top of list
+                color = mix(color, cur->obj->color(list->pixel));
+            } else {
+                // draw background
+                color = mix(color, backgroundColor);
+            }
         }
+        strip.setPixelColor(i, color);
 
         // remove drawn things from list
         obj_draw_list **cur = &list;
