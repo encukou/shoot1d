@@ -58,7 +58,7 @@ DEFOT(OT_PLAYER,   '@', 4, 200, 255, 255, 255,   0, OF_0);
 DEFOT(OT_DOOR,     '#', 3, 220,   0, 255, 255,   0, OF_0);
 DEFOT(OT_ENEMY,    '!', 4, 150, 255, 255, 255,   0, OF_0);
 DEFOT(OT_BONUS,    '$', 2,  50, 255, 255,   0,   0, OF_PASSABLE);
-DEFOT(OT_BULLET,   '-', 1, 230, 221, 175,  17, 100, OF_PASSABLE);
+DEFOT(OT_BULLET,   '-', 1, 220, 170, 150,  17, 100, OF_PASSABLE);
 DEFOT(OT_HEALTH,   '+', 2,  70, 255,   0,   0,   0, OF_PASSABLE);
 DEFOT(OT_AMMO,     '%', 2,  60,   0, 255,   0,   0, OF_PASSABLE);
 DEFOT(OT_BLOOD,    '.', 4,  10,  64,   0,   8,   0, OF_PASSABLE);
@@ -389,6 +389,18 @@ void loop() {
                     }
                 }
             } break;
+            case '\n': case ' ': {
+                bool shooting = true;
+                for (collision_iterator it(&player, CF_OVERLAP_FRONT | CF_TOUCH_FRONT); it; it.next()) {
+                    if (!it.obj->passable()) {
+                        shooting = false;
+                        break;
+                    }
+                }
+                if (shooting) {
+                    new object(OT_BULLET, player.end(), 0, &player);
+                }
+            }
             case '$': {
                 score += 1;
                 report = true;
@@ -412,6 +424,23 @@ void loop() {
                     it.obj->data2 = 0;
                 } else {
                     it.obj->data += dt;
+                }
+            }
+        } else if (it.obj->type == OT_BULLET) {
+            it.obj->data += dt;
+            while (it.obj->data > 256) {
+                it.obj->data -= 256;
+                bool have_space = true;
+                for (collision_iterator it(&player, CF_COLLIDING); it; it.next()) {
+                    if (!it.obj->passable()) {
+                        have_space = false;
+                    }
+                    if (it.obj->type == OT_ENEMY) {
+                        it.obj->data -= 1;
+                        if (it.obj->data == 0) {
+                            it.obj->type = OT_BLOOD;
+                        }
+                    }
                 }
             }
         }
