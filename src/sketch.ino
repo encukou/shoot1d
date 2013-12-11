@@ -1,14 +1,15 @@
 #include <Adafruit_NeoPixel.h>
 
-#define PIN 7
+#define LED_PIN 7
 #define NUM_LEDS 60 * 4
 #define BRIGHTNESS 10 // you want to look at the LEDs without getting blinded
+#define UNCONNECTED_ANALOG_PIN 0  // for randomness
 
 #define DEBUG 0
 
 #define OUTPUT(x) Serial.print(" " #x "="); Serial.print(x);
 
-Adafruit_NeoPixel strip = Adafruit_NeoPixel(NUM_LEDS, PIN, NEO_GRB | NEO_KHZ800);
+Adafruit_NeoPixel strip = Adafruit_NeoPixel(NUM_LEDS, LED_PIN, NEO_GRB | NEO_KHZ800);
 
 enum object_flag {
     OF_0 = 0,
@@ -93,6 +94,7 @@ enum collision_flag {
 byte health = 200;
 byte ammo = 100;
 byte gun_cooldown = 0;
+byte enemy_gun_cooldown = 0;
 uint32_t score = 0;
 int level = 3;
 
@@ -282,6 +284,14 @@ void sfx_flash(byte r, byte g, byte b, byte strength=255) {
     sfx_color[2] = b;
 }
 
+inline void cool_down(int dt, byte* value) {
+    if (dt > *value) {
+        *value = 0;
+    } else {
+        *value -= dt;
+    }
+}
+
 void print_objects() {
     object *it = &bound_start;
     while (it->prev) it = it->prev;
@@ -323,6 +333,8 @@ void print_objects() {
         it = it->next;
     }
     Serial.println();
+
+    randomSeed(analogRead(UNCONNECTED_ANALOG_PIN));
 }
 
 void setup() {
@@ -355,11 +367,8 @@ void loop() {
         }
     }
 
-    if (dt > gun_cooldown) {
-        gun_cooldown = 0;
-    } else {
-        gun_cooldown -= dt;
-    }
+    cool_down(dt, &gun_cooldown);
+    cool_down(dt, &enemy_gun_cooldown);
 
     // Player movement
     if (Serial.available()) {
@@ -397,24 +406,15 @@ void loop() {
                 }
             } break;
             case '\n': case ' ': {
-                bool shooting = true;
                 if (!gun_cooldown) {
-                    for (collision_iterator it(&player, CF_OVERLAP_FRONT | CF_TOUCH_FRONT); it; it.next()) {
-                        if (!it.obj->passable()) {
-                            shooting = false;
-                            break;
-                        }
-                    }
-                    if (shooting) {
-                        if (ammo) {
-                            object *bullet = new object(OT_BULLET, player.end(), 0, &player);
-                            bullet->data2 = 1;
-                            gun_cooldown = 50;
-                            ammo -= 1;
-                            report = true;
-                        } else {
-                            sfx_flash(0, 100, 200);
-                        }
+                    if (ammo) {
+                        object *bullet = new object(OT_BULLET, player.end(), 0, &player);
+                        bullet->data2 = 1;
+                        gun_cooldown = 50;
+                        ammo -= 1;
+                        report = true;
+                    } else {
+                        sfx_flash(0, 100, 200);
                     }
                 }
             } break;
@@ -426,8 +426,19 @@ void loop() {
         report = true;
     }
 
+    bool finding_active_enemy = false;
     for (collision_iterator it(&bound_start, CF_ALL); it; it.next()) {
-        if (it.obj->type == OT_DOOR) {
+        if (it.obj->type == OT_PLAYER) {
+            finding_active_enemy = true;
+        } else if (it.obj->type == OT_ENEMY) {
+            if (finding_active_enemy && !enemy_gun_cooldown) {
+                if (random(255) < 50) {
+                    object *bullet = new object(OT_BULLET, it.obj->position - 1, 0, it.obj);
+                    bullet->data2 = 2;
+                }
+                enemy_gun_cooldown = random(255);
+            }
+        } else if (it.obj->type == OT_DOOR) {
             if (it.obj->data2 == DOOR_CLOSE) {
                 if (it.obj->data <= dt) {
                     it.obj->data = 0;
@@ -448,7 +459,7 @@ void loop() {
             while (it.obj && newdata > 20) {
                 newdata -= 20;
                 bool have_space = true;
-                int flag = (it.obj->data2 > 0) ? CF_TOUCH_FRONT : CF_TOUCH_BEHIND;
+                int flag = (it.obj->data2 == 1) ? CF_TOUCH_FRONT : CF_TOUCH_BEHIND;
                 for (collision_iterator et(it.obj, flag); et; et.next()) {
                     if (!et.obj->passable() && et.obj != it.obj) {
                         have_space = false;
@@ -458,10 +469,17 @@ void loop() {
                         if (et.obj->data == 0) {
                             et.obj->type = OT_BLOOD;
                         }
+                    } else if (et.obj->type == OT_PLAYER) {
+                        if (health > 10) {
+                            health -= 10;
+                        } else {
+                            health = 10;
+                        }
+                        sfx_flash(255, 0, 0, 255);
                     }
                 }
                 if (have_space) {
-                    it.obj->move(it.obj->data2);
+                    it.obj->move((it.obj->data2 == 1) ? 1 : -1);
                 } else {
                     it.obj->remove();
                     it.obj = NULL;
@@ -470,6 +488,9 @@ void loop() {
             if (it.obj) {
                 it.obj->data = newdata;
             }
+        }
+        if (finding_active_enemy && !it.obj->passable() && it.obj->type != OT_PLAYER) {
+            finding_active_enemy = false;
         }
     }
 
