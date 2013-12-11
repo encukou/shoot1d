@@ -7,8 +7,6 @@
 
 #define DEBUG 0
 
-#define OUTPUT(x) Serial.print(" " #x "="); Serial.print(x);
-
 Adafruit_NeoPixel strip = Adafruit_NeoPixel(NUM_LEDS, LED_PIN, NEO_GRB | NEO_KHZ800);
 
 enum object_flag {
@@ -91,6 +89,14 @@ enum collision_flag {
 #define DOOR_CLOSE 1
 #define DOOR_OPEN 2
 
+#define PLAYERS_BULLET 1
+#define ENEMY_BULLET 2
+
+// Arduino tries to pre-declare all functions.
+// This won't work when they use types defined here.
+// We can use a nasty trick to supress the magic.
+#define LPAREN (
+
 byte health = 200;
 byte ammo = 100;
 byte gun_cooldown = 0;
@@ -104,6 +110,11 @@ byte sfx_color[3];
 int num_objs = 0;
 long lastMillis;
 
+struct object;
+
+object *freelist;
+object *player = NULL;
+
 struct object {
     const object_type *type;
     uint16_t position;
@@ -112,28 +123,40 @@ struct object {
     object* prev;
     object* next;
 
-    object(const object_type *type, uint16_t position, byte data, object* p):
-        type(type),
-        position(position),
-        data(data),
-        data2(0)
-    {
-        if (p) {
-            while (p->position < position && p->next) p = p->next;
-            while (p->position > position && p->prev) p = p->prev;
-            next = p->next;
-            prev = p;
-            p->next->prev = this;
-            p->next = this;
+    object(): type(0), position(0), data(0), data2(0), prev(0), next(0) {}
+
+    static object *create(const object_type *type, uint16_t position, byte data, byte data2, object* p) {
+        if (freelist) {
+            object *newobj = freelist;
+            freelist = freelist->next;
+
+            newobj->type = type;
+            newobj->position = position;
+            newobj->data = data;
+            newobj->data2 = data2;
+            if (p) {
+                while (p->position < position && p->next) p = p->next;
+                while (p->position > position && p->prev) p = p->prev;
+                newobj->next = p->next;
+                newobj->prev = p;
+                if (p->next) p->next->prev = newobj;
+                p->next = newobj;
+            } else {
+                newobj->next = newobj->prev = NULL;
+            }
+
+            return newobj;
+        } else {
+            return NULL;
         }
-        num_objs += 1;
     }
 
     void remove() {
         if (prev) prev->next = next;
         if (next) next->prev = prev;
-        delete this;
-        num_objs -= 1;
+        next = freelist;
+        prev = NULL;
+        freelist = this;
     }
 
     bool passable() {
@@ -218,6 +241,8 @@ struct object {
     }
 };
 
+object objects[10];
+
 struct obj_draw_list {
     object *obj;
     obj_draw_list *next;
@@ -274,10 +299,6 @@ private:
 };
 
 
-object bound_start(OT_BOUNDARY, 0, 0, NULL);
-object player(OT_PLAYER, PLAYER_START_POS, 0, &bound_start);
-object bound_end(OT_BOUNDARY, NUM_LEDS+1, 1, &bound_start);
-
 void sfx_flash(byte r, byte g, byte b, byte strength=255) {
     sfx_countdown = strength;
     sfx_color[0] = r;
@@ -294,7 +315,7 @@ inline void cool_down(int dt, byte* value) {
 }
 
 void print_objects() {
-    object *it = &bound_start;
+    object *it = player;
     while (it->prev) it = it->prev;
     Serial.print("FORW ");
     while (true) {
@@ -312,9 +333,6 @@ void print_objects() {
     }
     Serial.println();
 
-    Serial.print('[');
-    Serial.print(num_objs);
-    Serial.print("] ");
     while (true) {
         Serial.print(it->type->symbol);
         Serial.print(' ');
@@ -322,7 +340,7 @@ void print_objects() {
         Serial.print('+');
         Serial.print(it->length());
         Serial.print(' ');
-        Serial.print(player.get_collision_flag(it), HEX);
+        Serial.print(player->get_collision_flag(it), HEX);
         if (!it->next) break;
         if (it->cmp(it->next) > 0) {
             Serial.print(" > ");
@@ -344,10 +362,18 @@ void setup() {
     strip.setBrightness(BRIGHTNESS);
     strip.show();
     lastMillis = millis();
-    print_objects();
 
-    new object(OT_DOOR, PLAYER_START_POS+5, 0, &player);
-    new object(OT_ENEMY, PLAYER_START_POS+12, 3, &bound_start);
+    for (int i=1; i < sizeof(objects)/sizeof(*objects); i++) {
+        objects[i - 1].next = &objects[i];
+    }
+    freelist = objects;
+
+    player = object::create(OT_PLAYER, PLAYER_START_POS, 0, 0, NULL);
+
+    object::create(OT_DOOR, PLAYER_START_POS+5, 0, 0, player);
+    object::create(OT_ENEMY, PLAYER_START_POS+12, 3, 0, player);
+
+    print_objects();
 
     Serial.println("A - move left");
     Serial.println("D - move right");
@@ -378,26 +404,26 @@ bool handle_input() {
         switch (command) {
             case 'a': case 'A': {
                 bool moving = true;
-                for (collision_iterator it(&player, CF_OVERLAP_BEHIND | CF_TOUCH_BEHIND); it; it.next()) {
+                for (collision_iterator it(player, CF_OVERLAP_BEHIND | CF_TOUCH_BEHIND); it; it.next()) {
                     if (!it.obj->passable()) {
                         moving = false;
                         break;
                     }
                 }
-                if (moving and player.position > 0) player.move(-1);
+                if (moving and player->position > 0) player->move(-1);
             } break;
             case 'd': case 'D': {
                 bool moving = true;
-                for (collision_iterator it(&player, CF_OVERLAP_FRONT | CF_TOUCH_FRONT); it; it.next()) {
+                for (collision_iterator it(player, CF_OVERLAP_FRONT | CF_TOUCH_FRONT); it; it.next()) {
                     if (!it.obj->passable()) {
                         moving = false;
                         break;
                     }
                 }
-                if (moving) player.move(1);
+                if (moving) player->move(1);
             } break;
             case 'w': case 'W': {
-                for (collision_iterator it(&player, CF_TOUCH_FRONT | CF_TOUCH_BEHIND); it; it.next()) {
+                for (collision_iterator it(player, CF_TOUCH_FRONT | CF_TOUCH_BEHIND); it; it.next()) {
                     if (it.obj->type == OT_DOOR) {
                         if (it.obj->data == 255) {
                             it.obj->data2 = DOOR_CLOSE;
@@ -410,8 +436,7 @@ bool handle_input() {
             case '\n': case ' ': {
                 if (!gun_cooldown) {
                     if (ammo) {
-                        object *bullet = new object(OT_BULLET, player.end(), 0, &player);
-                        bullet->data2 = 1;
+                        object::create(OT_BULLET, player->end(), 0, PLAYERS_BULLET, player);
                         gun_cooldown = 50;
                         ammo -= 1;
                     } else {
@@ -443,14 +468,13 @@ bool update(int dt, long nowMillis) {
     cool_down(dt, &sfx_countdown);
 
     bool finding_active_enemy = false;
-    for (collision_iterator it(&bound_start, CF_ALL); it; it.next()) {
+    for (collision_iterator it(player, CF_ALL); it; it.next()) {
         if (it.obj->type == OT_PLAYER) {
             finding_active_enemy = true;
         } else if (it.obj->type == OT_ENEMY) {
             if (finding_active_enemy && !enemy_gun_cooldown) {
                 if (random(255) < 200) {
-                    object *bullet = new object(OT_BULLET, it.obj->position - 1, 0, it.obj);
-                    bullet->data2 = 2;
+                    object::create(OT_BULLET, it.obj->position - 1, 0, ENEMY_BULLET, it.obj);
                 }
                 enemy_gun_cooldown = random(100, 255);
             }
@@ -475,11 +499,8 @@ bool update(int dt, long nowMillis) {
             while (it.obj && newdata > 20) {
                 newdata -= 20;
                 bool have_space = true;
-                int flag = (it.obj->data2 == 1) ? CF_TOUCH_FRONT : CF_TOUCH_BEHIND;
+                int flag = (it.obj->data2 == PLAYERS_BULLET) ? CF_TOUCH_FRONT : CF_TOUCH_BEHIND;
                 for (collision_iterator et(it.obj, flag); et; et.next()) {
-                    if (!et.obj->passable() && et.obj != it.obj) {
-                        have_space = false;
-                    }
                     if (et.obj->type == OT_ENEMY) {
                         et.obj->data -= 1;
                         if (et.obj->data == 0) {
@@ -495,13 +516,21 @@ bool update(int dt, long nowMillis) {
                         sfx_flash(255, 0, 0, 255);
                         report = true;
                     }
+                    if (!et.obj->passable() && et.obj != it.obj) {
+                        have_space = false;
+                        break;
+                    }
                 }
                 if (have_space) {
-                    it.obj->move((it.obj->data2 == 1) ? 1 : -1);
+                    it.obj->move((it.obj->data2 == PLAYERS_BULLET) ? 1 : -1);
                 } else {
                     it.obj->remove();
                     it.obj = NULL;
                 }
+            }
+            if (it.obj && (it.obj->position < 0 || it.obj->position > NUM_LEDS)) {
+                it.obj->remove();
+                it.obj = NULL;
             }
             if (it.obj) {
                 it.obj->data = newdata;
@@ -569,12 +598,12 @@ void draw(long nowMillis, bool report) {
                                : 0;
     if (!health) backgroundColor |= rgba(255, 0, 0);
     // keep a priority-sorted list of objects we're currently drawing
-    object *current_obj = &bound_start;
+    object *current_obj = player;
+    while (current_obj->prev) current_obj = current_obj->prev;
     obj_draw_list list_base;  // sentinel
     obj_draw_list *list = &list_base;
     for (int px=0; i <= NUM_LEDS; px++, i++) {
-        while (current_obj && current_obj->next && current_obj->next->position <= px) {
-            current_obj = current_obj->next;
+        while (current_obj && current_obj->position <= px) {
             // add obj to list
             obj_draw_list *newitem = new obj_draw_list(current_obj);
             obj_draw_list **cur = &list;
@@ -584,6 +613,7 @@ void draw(long nowMillis, bool report) {
             }
             newitem->next = *cur;
             *cur = newitem;
+            current_obj = current_obj->next;
         }
 
         uint32_t color = rgba(0, 0, 0, 255);
@@ -629,6 +659,9 @@ void draw(long nowMillis, bool report) {
         Serial.print(score);
         Serial.print(" lv");
         Serial.print(level - 3);
+        for (object *f = freelist; f; f = f->next) {
+            Serial.print('.');
+        }
         Serial.println();
     }
 }
