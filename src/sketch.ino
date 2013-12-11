@@ -44,21 +44,25 @@ uint32_t mix(uint32_t color1, uint32_t color2) {
     if (c1a == 255) return color2;
     if (c1a == 0 || getA(color2) == 255) return color1;
     return rgba(
-        (getR(color1) * (255 - c1a) + getR(color2) * c1a) / 255,
-        (getG(color1) * (255 - c1a) + getG(color2) * c1a) / 255,
-        (getB(color1) * (255 - c1a) + getB(color2) * c1a) / 255,
-        c1a + getA(color2) * (255 - c1a) / 255);
+        (getR(color1) * (255 - c1a) + getR(color2) * c1a) >> 8,
+        (getG(color1) * (255 - c1a) + getG(color2) * c1a) >> 8,
+        (getB(color1) * (255 - c1a) + getB(color2) * c1a) >> 8,
+        c1a + getA(color2) * (255 - c1a) >> 8);
 }
 
-const object_type OT_PLAYER   = {'@', 4, 200, rgba(255, 255, 255), OF_0};
-const object_type OT_DOOR     = {'#', 3, 220, rgba(  0, 255, 255), OF_0};
-const object_type OT_ENEMY    = {'!', 4, 150, rgba(255, 255, 255), OF_0};
-const object_type OT_BONUS    = {'$', 2,  50, rgba(255, 255,   0), OF_PASSABLE};
-const object_type OT_BULLET   = {'-', 2, 230, rgba(221, 175,  17), OF_PASSABLE};
-const object_type OT_HEALTH   = {'+', 2,  70, rgba(255,   0,   0), OF_PASSABLE};
-const object_type OT_AMMO     = {'%', 2,  60, rgba(  0, 255,   0), OF_PASSABLE};
-const object_type OT_BLOOD    = {'.', 4,  10, rgba( 64,   0,   8), OF_PASSABLE};
-const object_type OT_BOUNDARY = {'|', 1,   1, rgba(  0,   0,   0), OF_0};
+#define DEFOT(name, symbol, length, prio, r, g, b, a, flags) \
+    const object_type _struct ## name = {symbol, length, prio, rgba(r, g, b, a), flags}; \
+    const object_type *name = & _struct ## name;
+
+DEFOT(OT_PLAYER,   '@', 4, 200, 255, 255, 255,   0, OF_0);
+DEFOT(OT_DOOR,     '#', 3, 220,   0, 255, 255,   0, OF_0);
+DEFOT(OT_ENEMY,    '!', 4, 150, 255, 255, 255,   0, OF_0);
+DEFOT(OT_BONUS,    '$', 2,  50, 255, 255,   0,   0, OF_PASSABLE);
+DEFOT(OT_BULLET,   '-', 1, 230, 221, 175,  17, 100, OF_PASSABLE);
+DEFOT(OT_HEALTH,   '+', 2,  70, 255,   0,   0,   0, OF_PASSABLE);
+DEFOT(OT_AMMO,     '%', 2,  60,   0, 255,   0,   0, OF_PASSABLE);
+DEFOT(OT_BLOOD,    '.', 4,  10,  64,   0,   8,   0, OF_PASSABLE);
+DEFOT(OT_BOUNDARY, '|', 1,   1,   0,   0,   0,   0, OF_0);
 
 enum collision_flag {
                     // Legend: s: self; o: other; X: both
@@ -98,14 +102,14 @@ int num_objs = 0;
 long lastMillis;
 
 struct object {
-    const object_type &type;
+    const object_type *type;
     uint16_t position;
     byte data;
     byte data2;
     object* prev;
     object* next;
 
-    object(const object_type &type, uint16_t position, byte data, object* p):
+    object(const object_type *type, uint16_t position, byte data, object* p):
         type(type),
         position(position),
         data(data),
@@ -131,7 +135,7 @@ struct object {
 
     bool passable() {
         if (type == OT_DOOR && data == 255) return true;
-        return this->type.flags & OF_PASSABLE;
+        return this->type->flags & OF_PASSABLE;
     }
 
     uint32_t color(int pixel) {
@@ -140,13 +144,13 @@ struct object {
             if (pixel == 2) return rgba(200, health, health, 2);
         } else if (type == OT_DOOR && data) {
             if (pixel == 1) return rgba(0, 255, 255, data);
-            return rgba(0, 255 - data, 255 - data/2, data/4);
+            return rgba(0, 255 - data, 255 - data*2/3, data/4);
         }
-        return this->type.default_color;
+        return this->type->default_color;
     }
 
     int length() {
-        return this->type.default_length;
+        return this->type->default_length;
     }
 
     uint16_t end() {
@@ -282,7 +286,7 @@ void print_objects() {
     while (it->prev) it = it->prev;
     Serial.print("FORW ");
     while (true) {
-        Serial.print(it->type.symbol);
+        Serial.print(it->type->symbol);
         if (!it->next) break;
         it = it->next;
     }
@@ -290,7 +294,7 @@ void print_objects() {
 
     Serial.print("BACK ");
     while (true) {
-        Serial.print(it->type.symbol);
+        Serial.print(it->type->symbol);
         if (!it->prev) break;
         it = it->prev;
     }
@@ -300,7 +304,7 @@ void print_objects() {
     Serial.print(num_objs);
     Serial.print("] ");
     while (true) {
-        Serial.print(it->type.symbol);
+        Serial.print(it->type->symbol);
         Serial.print(' ');
         Serial.print(it->position);
         Serial.print('+');
@@ -329,11 +333,12 @@ void setup() {
     print_objects();
 
     new object(OT_DOOR, PLAYER_START_POS+5, 0, &player);
-    new object(OT_ENEMY, PLAYER_START_POS+12, 0, &bound_start);
+    new object(OT_ENEMY, PLAYER_START_POS+12, 3, &bound_start);
 
     Serial.println("A - move left");
     Serial.println("D - move right");
     Serial.println("W - action (open/close door)");
+    Serial.println("Enter, Space - shoot!");
 }
 
 void loop() {
@@ -459,9 +464,9 @@ void loop() {
     // playing field
     i++;
     uint32_t backgroundColor = sfx_countdown
-                               ? strip.Color(sfx_countdown * sfx_color[0] / 255,
-                                             sfx_countdown * sfx_color[1] / 255,
-                                             sfx_countdown * sfx_color[2] / 255)
+                               ? strip.Color(sfx_countdown * sfx_color[0] >> 8,
+                                             sfx_countdown * sfx_color[1] >> 8,
+                                             sfx_countdown * sfx_color[2] >> 8)
                                : 0;
     // keep a priority-sorted list of objects we're currently drawing
     object *current_obj = &bound_start;
@@ -474,7 +479,7 @@ void loop() {
             obj_draw_list *newitem = new obj_draw_list(current_obj);
             obj_draw_list **cur = &list;
             while (*cur && (*cur)->next &&
-                    (*cur)->obj->type.draw_priority > newitem->obj->type.draw_priority) {
+                    (*cur)->obj->type->draw_priority > newitem->obj->type->draw_priority) {
                 cur = &((*cur)->next);
             }
             newitem->next = *cur;
