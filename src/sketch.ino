@@ -98,7 +98,7 @@ byte enemy_gun_cooldown = 0;
 uint32_t score = 0;
 int level = 3;
 
-int sfx_countdown = 0;
+byte sfx_countdown = 0;
 byte sfx_color[3];
 
 int num_objs = 0;
@@ -143,8 +143,9 @@ struct object {
 
     uint32_t color(int pixel) {
         if (type == OT_PLAYER) {
-            if (pixel == 1) return rgba(ammo, ammo, 255, 1);
             if (pixel == 2) return rgba(200, health, health, 2);
+            if (!health) return rgba(0, 0, 0);
+            if (pixel == 1) return rgba(ammo, ammo, 255, 1);
         } else if (type == OT_DOOR && data) {
             if (pixel == 1) return rgba(0, 255, 255, data);
             return rgba(0, 255 - data, 255 - data*2/3, data/4);
@@ -355,21 +356,22 @@ void setup() {
 }
 
 void loop() {
-    bool report = false;
     long nowMillis = millis();
     int dt = nowMillis - lastMillis;
 
-    // Roughly every second (1024=2**10 ms)
-    if (nowMillis >> 10 != lastMillis >> 10) {
-        if (health > 200) {
-            health -= 1;
-            report = true;
-        }
+    bool report;
+
+    if (health) {
+        report |= update(dt, nowMillis);
+        report |= handle_input();
     }
 
-    cool_down(dt, &gun_cooldown);
-    cool_down(dt, &enemy_gun_cooldown);
+    draw(nowMillis, report);
 
+    lastMillis = nowMillis;
+}
+
+bool handle_input() {
     // Player movement
     if (Serial.available()) {
         byte command = Serial.read();
@@ -412,7 +414,6 @@ void loop() {
                         bullet->data2 = 1;
                         gun_cooldown = 50;
                         ammo -= 1;
-                        report = true;
                     } else {
                         sfx_flash(0, 100, 200);
                     }
@@ -420,11 +421,26 @@ void loop() {
             } break;
             case '$': {
                 score += 1;
-                report = true;
             } break;
         }
-        report = true;
+        return true;
     }
+    return false;
+}
+
+bool update(int dt, long nowMillis) {
+    bool report;
+    // Roughly every second (1024=2**10 ms)
+    if (nowMillis >> 10 != lastMillis >> 10) {
+        if (health > 200) {
+            health -= 1;
+            report = true;
+        }
+    }
+
+    cool_down(dt, &gun_cooldown);
+    cool_down(dt/3, &enemy_gun_cooldown);
+    cool_down(dt, &sfx_countdown);
 
     bool finding_active_enemy = false;
     for (collision_iterator it(&bound_start, CF_ALL); it; it.next()) {
@@ -432,11 +448,11 @@ void loop() {
             finding_active_enemy = true;
         } else if (it.obj->type == OT_ENEMY) {
             if (finding_active_enemy && !enemy_gun_cooldown) {
-                if (random(255) < 50) {
+                if (random(255) < 200) {
                     object *bullet = new object(OT_BULLET, it.obj->position - 1, 0, it.obj);
                     bullet->data2 = 2;
                 }
-                enemy_gun_cooldown = random(255);
+                enemy_gun_cooldown = random(100, 255);
             }
         } else if (it.obj->type == OT_DOOR) {
             if (it.obj->data2 == DOOR_CLOSE) {
@@ -470,12 +486,14 @@ void loop() {
                             et.obj->type = OT_BLOOD;
                         }
                     } else if (et.obj->type == OT_PLAYER) {
-                        if (health > 10) {
-                            health -= 10;
+                        byte damage = random(5, 15);
+                        if (health > damage) {
+                            health -= damage;
                         } else {
-                            health = 10;
+                            health = 0;
                         }
                         sfx_flash(255, 0, 0, 255);
+                        report = true;
                     }
                 }
                 if (have_space) {
@@ -505,6 +523,10 @@ void loop() {
         level = score_length;
     }
 
+    return report;
+}
+
+void draw(long nowMillis, bool report) {
     memset(strip.getPixels(), 0, strip.numPixels() * 3);
     // health pixel
     if (health > 10) {
@@ -545,6 +567,7 @@ void loop() {
                                              sfx_countdown * sfx_color[1] >> 8,
                                              sfx_countdown * sfx_color[2] >> 8)
                                : 0;
+    if (!health) backgroundColor |= rgba(255, 0, 0);
     // keep a priority-sorted list of objects we're currently drawing
     object *current_obj = &bound_start;
     obj_draw_list list_base;  // sentinel
@@ -608,11 +631,4 @@ void loop() {
         Serial.print(level - 3);
         Serial.println();
     }
-
-    if (sfx_countdown) {
-        sfx_countdown -= dt;
-        if(sfx_countdown < 0) sfx_countdown = 0;
-    }
-
-    lastMillis = nowMillis;
 }
