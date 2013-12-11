@@ -61,7 +61,7 @@ DEFOT(OT_BONUS,    '$', 2,  50, 255, 255,   0,   0, OF_PASSABLE);
 DEFOT(OT_BULLET,   '-', 1, 220, 170, 150,  17, 100, OF_PASSABLE);
 DEFOT(OT_HEALTH,   '+', 2,  70, 255,   0,   0,   0, OF_PASSABLE);
 DEFOT(OT_AMMO,     '%', 2,  60,   0, 255,   0,   0, OF_PASSABLE);
-DEFOT(OT_BLOOD,    '.', 4,  10,  64,   0,   8,   0, OF_PASSABLE);
+DEFOT(OT_BLOOD,    '.', 4,  10,  30,   0,   8,   0, OF_PASSABLE);
 DEFOT(OT_BOUNDARY, '|', 1,   1,   0,   0,   0,   0, OF_0);
 
 enum collision_flag {
@@ -92,6 +92,7 @@ enum collision_flag {
 
 byte health = 200;
 byte ammo = 100;
+byte gun_cooldown = 0;
 uint32_t score = 0;
 int level = 3;
 
@@ -354,6 +355,12 @@ void loop() {
         }
     }
 
+    if (dt > gun_cooldown) {
+        gun_cooldown = 0;
+    } else {
+        gun_cooldown -= dt;
+    }
+
     // Player movement
     if (Serial.available()) {
         byte command = Serial.read();
@@ -391,16 +398,26 @@ void loop() {
             } break;
             case '\n': case ' ': {
                 bool shooting = true;
-                for (collision_iterator it(&player, CF_OVERLAP_FRONT | CF_TOUCH_FRONT); it; it.next()) {
-                    if (!it.obj->passable()) {
-                        shooting = false;
-                        break;
+                if (!gun_cooldown) {
+                    for (collision_iterator it(&player, CF_OVERLAP_FRONT | CF_TOUCH_FRONT); it; it.next()) {
+                        if (!it.obj->passable()) {
+                            shooting = false;
+                            break;
+                        }
+                    }
+                    if (shooting) {
+                        if (ammo) {
+                            object *bullet = new object(OT_BULLET, player.end(), 0, &player);
+                            bullet->data2 = 1;
+                            gun_cooldown = 50;
+                            ammo -= 1;
+                            report = true;
+                        } else {
+                            sfx_flash(0, 100, 200);
+                        }
                     }
                 }
-                if (shooting) {
-                    new object(OT_BULLET, player.end(), 0, &player);
-                }
-            }
+            } break;
             case '$': {
                 score += 1;
                 report = true;
@@ -427,21 +444,31 @@ void loop() {
                 }
             }
         } else if (it.obj->type == OT_BULLET) {
-            it.obj->data += dt;
-            while (it.obj->data > 256) {
-                it.obj->data -= 256;
+            int newdata = it.obj->data + dt;
+            while (it.obj && newdata > 20) {
+                newdata -= 20;
                 bool have_space = true;
-                for (collision_iterator it(&player, CF_COLLIDING); it; it.next()) {
-                    if (!it.obj->passable()) {
+                int flag = (it.obj->data2 > 0) ? CF_TOUCH_FRONT : CF_TOUCH_BEHIND;
+                for (collision_iterator et(it.obj, flag); et; et.next()) {
+                    if (!et.obj->passable() && et.obj != it.obj) {
                         have_space = false;
                     }
-                    if (it.obj->type == OT_ENEMY) {
-                        it.obj->data -= 1;
-                        if (it.obj->data == 0) {
-                            it.obj->type = OT_BLOOD;
+                    if (et.obj->type == OT_ENEMY) {
+                        et.obj->data -= 1;
+                        if (et.obj->data == 0) {
+                            et.obj->type = OT_BLOOD;
                         }
                     }
                 }
+                if (have_space) {
+                    it.obj->move(it.obj->data2);
+                } else {
+                    it.obj->remove();
+                    it.obj = NULL;
+                }
+            }
+            if (it.obj) {
+                it.obj->data = newdata;
             }
         }
     }
