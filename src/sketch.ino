@@ -122,6 +122,12 @@ byte sfx_color[3];
 int num_objs = 0;
 long lastMillis;
 
+#if NUM_LEDS < 250
+byte typedef position_type;
+#else
+uint16_t typedef position_type;
+#endif
+
 struct object;
 
 object *freelist;
@@ -143,14 +149,14 @@ struct objecttype_ptr {
 
 struct object {
     objecttype_ptr type;
-    uint16_t position;
+    position_type position;
     byte data;
     object* prev;
     object* next;
 
     object(): type(OT_LAST, 0), position(0), data(0), prev(0), next(0) {}
 
-    static object *create(object_type_name type, uint16_t position, byte data, bool flag, object* p) {
+    static object *create(object_type_name type, position_type position, byte data, bool flag, object* p) {
         if (freelist) {
             object *newobj = freelist;
             freelist = freelist->next;
