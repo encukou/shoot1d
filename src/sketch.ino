@@ -49,19 +49,31 @@ uint32_t mix(uint32_t color1, uint32_t color2) {
         c1a + getA(color2) * (255 - c1a) >> 8);
 }
 
-#define DEFOT(name, symbol, length, prio, r, g, b, a, flags) \
-    const object_type _struct ## name = {symbol, length, prio, rgba(r, g, b, a), flags}; \
-    const object_type *name = & _struct ## name;
+enum object_type_name {
+    OT_PLAYER,
+    OT_DOOR,
+    OT_ENEMY,
+    OT_BONUS,
+    OT_BULLET,
+    OT_HEALTH,
+    OT_AMMO,
+    OT_BLOOD,
 
-DEFOT(OT_PLAYER,   '@', 4, 200, 255, 255, 255,   0, OF_0);
-DEFOT(OT_DOOR,     '#', 3, 220,   0, 255, 255,   0, OF_0);
-DEFOT(OT_ENEMY,    '!', 4, 150, 255, 255, 255,   0, OF_0);
-DEFOT(OT_BONUS,    '$', 2,  50, 255, 255,   0,   0, OF_PASSABLE);
-DEFOT(OT_BULLET,   '-', 1, 220, 170, 150,  17, 100, OF_PASSABLE);
-DEFOT(OT_HEALTH,   '+', 2,  70, 255,   0,   0,   0, OF_PASSABLE);
-DEFOT(OT_AMMO,     '%', 2,  60,   0, 255,   0,   0, OF_PASSABLE);
-DEFOT(OT_BLOOD,    '.', 4,  10,  30,   0,   8,   0, OF_PASSABLE);
-DEFOT(OT_BOUNDARY, '|', 1,   1,   0,   0,   0,   0, OF_0);
+    OT_LAST,
+};
+
+object_type obj_types[] = {
+    {'@', 4, 200, rgba(255, 255, 255,   0), OF_0},           // PLAYER
+    {'#', 3, 220, rgba(  0, 255, 255,   0), OF_0},           // DOOR
+    {'!', 4, 150, rgba(255, 255, 255,   0), OF_0},           // ENEMY
+    {'$', 2,  50, rgba(255, 255,   0,   0), OF_PASSABLE},    // BONUS
+    {'-', 1, 220, rgba(170, 150,  17, 100), OF_PASSABLE},    // BULLET
+    {'+', 2,  70, rgba(255,   0,   0,   0), OF_PASSABLE},    // HEALTH
+    {'%', 2,  60, rgba(  0, 255,   0,   0), OF_PASSABLE},    // AMMO
+    {'.', 4,  10, rgba( 30,   0,   8,   0), OF_PASSABLE},    // BLOOD
+
+    {'?', 1,   0, rgba(100, 100, 100,   0), OF_0},           // LAST
+};
 
 enum collision_flag {
                     // Legend: s: self; o: other; X: both
@@ -86,11 +98,11 @@ enum collision_flag {
 #define AMMO_LED 1
 #define SCORE_LED1 2
 
-#define DOOR_CLOSE 1
-#define DOOR_OPEN 2
+#define DOOR_CLOSE false
+#define DOOR_OPEN true
 
-#define PLAYERS_BULLET 1
-#define ENEMY_BULLET 2
+#define PLAYERS_BULLET true
+#define ENEMY_BULLET false
 
 // Arduino tries to pre-declare all functions.
 // This won't work when they use types defined here.
@@ -115,25 +127,38 @@ struct object;
 object *freelist;
 object *player = NULL;
 
+struct objecttype_ptr {
+    static const byte ptr_mask = 0x7f;
+    static const byte flag_mask = 0x80;
+    byte data;
+    objecttype_ptr(object_type_name n, bool flag): data(n | (flag ? flag_mask : 0)) {};
+    object_type &operator* () { return obj_types[data & ptr_mask]; };
+    object_type *operator->() { return &obj_types[data & ptr_mask]; };
+    bool operator==(const object_type_name &n) { return (data & ptr_mask) == n; };
+    bool operator!=(const object_type_name &n) { return (data & ptr_mask) != n; };
+    void set(const object_type_name n) { data = n; };
+    bool get_flag(){ return bool(data & flag_mask); };
+    void set_flag(bool flag){ data = (data & ptr_mask) | (flag ? flag_mask : 0); };
+};
+
 struct object {
-    const object_type *type;
+    objecttype_ptr type;
     uint16_t position;
     byte data;
-    byte data2;
     object* prev;
     object* next;
 
-    object(): type(0), position(0), data(0), data2(0), prev(0), next(0) {}
+    object(): type(OT_LAST, 0), position(0), data(0), prev(0), next(0) {}
 
-    static object *create(const object_type *type, uint16_t position, byte data, byte data2, object* p) {
+    static object *create(object_type_name type, uint16_t position, byte data, bool flag, object* p) {
         if (freelist) {
             object *newobj = freelist;
             freelist = freelist->next;
 
-            newobj->type = type;
+            newobj->type.set(type);
             newobj->position = position;
             newobj->data = data;
-            newobj->data2 = data2;
+            newobj->type.set_flag(flag);
             if (p) {
                 while (p->position < position && p->next) p = p->next;
                 while (p->position > position && p->prev) p = p->prev;
@@ -157,6 +182,14 @@ struct object {
         next = freelist;
         prev = NULL;
         freelist = this;
+    }
+
+    bool flag() {
+        return type.get_flag();
+    }
+
+    void set_flag(bool flag) {
+        type.set_flag(flag);
     }
 
     bool passable() {
@@ -363,17 +396,18 @@ void setup() {
     strip.show();
     lastMillis = millis();
 
+    memset(objects, 0, sizeof(objects));
     for (int i=1; i < sizeof(objects)/sizeof(*objects); i++) {
         objects[i - 1].next = &objects[i];
     }
     freelist = objects;
 
+    Serial.println(sizeof(object));
+
     player = object::create(OT_PLAYER, PLAYER_START_POS, 0, 0, NULL);
 
     object::create(OT_DOOR, PLAYER_START_POS+5, 0, 0, player);
     object::create(OT_ENEMY, PLAYER_START_POS+12, 3, 0, player);
-
-    print_objects();
 
     Serial.println("A - move left");
     Serial.println("D - move right");
@@ -426,9 +460,9 @@ bool handle_input() {
                 for (collision_iterator it(player, CF_TOUCH_FRONT | CF_TOUCH_BEHIND); it; it.next()) {
                     if (it.obj->type == OT_DOOR) {
                         if (it.obj->data == 255) {
-                            it.obj->data2 = DOOR_CLOSE;
+                            it.obj->set_flag(DOOR_CLOSE);
                         } else {
-                            it.obj->data2 = DOOR_OPEN;
+                            it.obj->set_flag(DOOR_OPEN);
                         }
                     }
                 }
@@ -479,17 +513,15 @@ bool update(int dt, long nowMillis) {
                 enemy_gun_cooldown = random(100, 255);
             }
         } else if (it.obj->type == OT_DOOR) {
-            if (it.obj->data2 == DOOR_CLOSE) {
+            if (it.obj->flag() == DOOR_CLOSE) {
                 if (it.obj->data <= dt) {
                     it.obj->data = 0;
-                    it.obj->data2 = 0;
                 } else {
                     it.obj->data -= dt;
                 }
-            } else if (it.obj->data2 == DOOR_OPEN) {
+            } else if (it.obj->flag() == DOOR_OPEN) {
                 if (it.obj->data + int(dt) >= 255) {
                     it.obj->data = 255;
-                    it.obj->data2 = 0;
                 } else {
                     it.obj->data += dt;
                 }
@@ -499,12 +531,12 @@ bool update(int dt, long nowMillis) {
             while (it.obj && newdata > 20) {
                 newdata -= 20;
                 bool have_space = true;
-                int flag = (it.obj->data2 == PLAYERS_BULLET) ? CF_TOUCH_FRONT : CF_TOUCH_BEHIND;
+                int flag = (it.obj->flag() == PLAYERS_BULLET) ? CF_TOUCH_FRONT : CF_TOUCH_BEHIND;
                 for (collision_iterator et(it.obj, flag); et; et.next()) {
                     if (et.obj->type == OT_ENEMY) {
                         et.obj->data -= 1;
                         if (et.obj->data == 0) {
-                            et.obj->type = OT_BLOOD;
+                            et.obj->type.set(OT_BLOOD);
                         }
                     } else if (et.obj->type == OT_PLAYER) {
                         byte damage = random(5, 15);
@@ -522,7 +554,7 @@ bool update(int dt, long nowMillis) {
                     }
                 }
                 if (have_space) {
-                    it.obj->move((it.obj->data2 == PLAYERS_BULLET) ? 1 : -1);
+                    it.obj->move((it.obj->flag() == PLAYERS_BULLET) ? 1 : -1);
                 } else {
                     it.obj->remove();
                     it.obj = NULL;
